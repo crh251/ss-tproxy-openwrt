@@ -91,7 +91,9 @@ udp_port_is_exists() {
 }
 
 ss_tproxy_is_started() {
-    process_is_running "$status_dnsmasq_pid"  ||
+    # do not need on openwrt
+    # process_is_running "$status_dnsmasq_pid"  ||
+    
     process_is_running "$status_chinadns_pid" ||
     process_is_running "$status_dns2tcp4_pid" ||
     process_is_running "$status_dns2tcp6_pid" ||
@@ -239,7 +241,26 @@ waiting_network() {
 }
 
 load_pidfile() {
-    source "$file_dnsserver_pid" || log_error "load pidfile failed, exit-code: $?"
+    # source "$file_dnsserver_pid" || log_error "load pidfile failed, exit-code: $?"
+
+    load_openwrt_dnsmasq_pid
+    # openwrt should dynamic get dnsmasq pid
+    echo openwrt dnsmasq pid: $openwrt_dnsmasq_pid
+    status_dnsmasq_pid=$openwrt_dnsmasq_pid
+}
+
+load_openwrt_dnsmasq_pid() {
+    # openwrt dnsmasq pid
+    while true
+    do
+        openwrt_dnsmasq_pid=$(ps|grep "dnsmasq -C /var/etc/dnsmasq.conf.cfg01411c" | grep -v grep | awk '{print $1}')
+        if [ "$openwrt_dnsmasq_pid" == "" ]; then
+                sleep 1;
+                echo "dnsmasq not running...";
+        else
+                break;
+        fi
+    done
 }
 
 update_pidfile() {
@@ -250,6 +271,7 @@ update_pidfile() {
 }
 
 delete_pidfile() {
+    # echo 'delete pid file: $file_dnsserver_pid'
     rm -f $file_dnsserver_pid &>/dev/null
 }
 
@@ -269,6 +291,9 @@ check_config() {
     file_is_exists "$file_chnroute_set"  || log_error "file not found: $file_chnroute_set"
     file_is_exists "$file_chnroute6_set" || log_error "file not found: $file_chnroute6_set"
     file_is_exists "$file_dnsserver_pid" && load_pidfile
+
+    # openwrt only support gfw
+    { ! is_gfwlist_mode; } && log_error "only support gfw mode, the value of the mode option is invalid: $mode"
 
     { ! is_global_mode && ! is_gfwlist_mode && ! is_chnroute_mode; } && log_error "the value of the mode option is invalid: $mode"
 
@@ -454,28 +479,35 @@ start_dnsserver_global() {
         done)
 EOF
 )
+    # openwrt hint
+    echo 'Not support global mode on openwrt'
     status_dnsmasq_pid=$(dnsmasq --keep-in-foreground --conf-file=- <<<"$dnsmasq_config_string" & echo $!)
 }
 
 start_dnsserver_gfwlist() {
     local dnsmasq_config_string=$(cat <<EOF
         $(echo "$dnsmasq_common_config")
-        $(is_true "$ipv4" && echo "server = $dns_direct")
+        $(is_true "$ipv4" && echo "\nserver = $dns_direct")
         $(is_true "$ipv6" && echo "server = $dns_direct6")
         $({ cat $file_gfwlist_txt; grep -E '^@' $file_gfwlist_ext | cut -c2-; } | while read domain_name; do
-            is_true "$ipv4" && echo "server = /$domain_name/$dns_remote"
+            is_true "$ipv4" && echo "\nserver = /$domain_name/$dns_remote"
             is_true "$ipv6" && echo "server = /$domain_name/$dns_remote6"
             if is_true "$ipv4" && is_true "$ipv6"; then
                 echo "ipset = /$domain_name/gfwlist,gfwlist6"
             elif is_true "$ipv4"; then
-                echo "ipset = /$domain_name/gfwlist"
+                echo "\nipset = /$domain_name/gfwlist"
             else
                 echo "ipset = /$domain_name/gfwlist6"
             fi
         done)
 EOF
 )
-    status_dnsmasq_pid=$(dnsmasq --keep-in-foreground --conf-file=- <<<"$dnsmasq_config_string" & echo $!)
+    # openwrt write to config file
+    echo -e $dnsmasq_config_string > /etc/ss-tproxy/dnsmasq.conf
+    # restart openwrt dnsmasq
+    /etc/init.d/dnsmasq restart
+    sleep 1s
+    load_pidfile
 }
 
 start_dnsserver_chnroute() {
@@ -523,6 +555,8 @@ start_dnsserver_chnroute() {
         done)
 EOF
 )
+    # openwrt hint
+    echo 'Not support chnrote mode on openwrt'
     status_dnsmasq_pid=$(dnsmasq --keep-in-foreground --conf-file=- <<<"$dnsmasq_config_string" & echo $!)
 }
 
@@ -551,18 +585,18 @@ start_dnsserver() {
 
     local dnsmasq_common_config=$(cat <<EOF
         $(is_true "$dnsmasq_log_enable" && echo 'log-queries')
-        log-facility = $dnsmasq_log_file
-        log-async = 20
-        domain-needed
-        cache-size = $dnsmasq_cache_size
-        $([ $(dnsmasq --help | grep -c min-cache-ttl) -ne 0 ] && echo "min-cache-ttl = $dnsmasq_cache_time")
-        no-negcache
-        no-resolv
-        port = $dnsmasq_bind_port
-        dns-forward-max = $dnsmasq_query_maxcnt
-        $(for append_config in "${dnsmasq_append_config[@]}"; do echo "$append_config"; done)
-        $(for conf_dir_arg in "${dnsmasq_conf_dir[@]}"; do echo "conf-dir = $conf_dir_arg"; done)
-        $(for conf_file_arg in "${dnsmasq_conf_file[@]}"; do echo "conf-file = $conf_file_arg"; done)
+        \nlog-facility = $dnsmasq_log_file
+        \nlog-async = 20
+        \ndomain-needed
+        \ncache-size = $dnsmasq_cache_size
+        $([ $(dnsmasq --help | grep -c min-cache-ttl) -ne 0 ] && echo "\nmin-cache-ttl = $dnsmasq_cache_time")
+        \nno-negcache
+        \nno-resolv
+        \nport = $dnsmasq_bind_port
+        \ndns-forward-max = $dnsmasq_query_maxcnt
+        $(for append_config in "${dnsmasq_append_config[@]}"; do echo "\n$append_config"; done)
+        $(for conf_dir_arg in "${dnsmasq_conf_dir[@]}"; do echo "conf-dir = \n$conf_dir_arg"; done)
+        $(for conf_file_arg in "${dnsmasq_conf_file[@]}"; do echo "conf-file = \n$conf_file_arg"; done)
 EOF
 )
 
@@ -610,11 +644,18 @@ EOF
 }
 
 stop_dnsserver() {
-    kill -9 $status_dnsmasq_pid  &>/dev/null
+    # openwrt write empty file to dnsmasq.conf
+    echo '' > /etc/ss-tproxy/dnsmasq.conf
+    echo 'start stop dnsmasq'
+
+    /etc/init.d/dnsmasq restart &>/dev/null
     kill -9 $status_chinadns_pid &>/dev/null
     kill -9 $status_dns2tcp4_pid &>/dev/null
     kill -9 $status_dns2tcp6_pid &>/dev/null
+
     delete_pidfile
+    
+    load_pidfile
 }
 
 flush_dnscache() {
@@ -1118,6 +1159,8 @@ start_iptables() {
 
 start() {
     ss_tproxy_is_started && { stop; status; echo; }
+
+
     waiting_network "$opts_ip_for_check_net"
     [ "$(type -t pre_start)" = 'function' ] && pre_start
 
@@ -1125,12 +1168,14 @@ start() {
     enable_ipforward
     enable_rtlocalnet
     disable_icmpredir
-    restore_resolvconf
+    # openwrt no need
+    # restore_resolvconf
     resolve_svraddr
     start_proxy_proc
     start_dnsserver
     start_iptables
-    modify_resolvconf
+    # openwrt no need
+    # modify_resolvconf
 
     [ "$(type -t post_start)" = 'function' ] && post_start
     delete_unused_iptchains
@@ -1139,7 +1184,8 @@ start() {
 stop() {
     [ "$(type -t pre_stop)" = 'function' ] && pre_stop
 
-    restore_resolvconf
+    # openwrt no need
+    # restore_resolvconf
     flush_iptables
     delete_chnroute
     delete_iproute2
